@@ -39,6 +39,7 @@ typedef enum
 {
   LASER_MODEL_BEAM,
   LASER_MODEL_LIKELIHOOD_FIELD,
+  LASER_MODEL_LIKELIHOOD_FIELD_PRECISE,
   LASER_MODEL_LIKELIHOOD_FIELD_PROB
 } laser_model_t;
 
@@ -104,6 +105,10 @@ class AMCLLaser : public AMCLSensor
   // Determine the probability for the given pose - more probablistic model 
   private: static double LikelihoodFieldModelProb(AMCLLaserData *data, 
 					     pf_sample_set_t* set);
+
+
+  private: static double LikelihoodFieldModelPrecise(AMCLLaserData *data,
+                                              			 pf_sample_set_t* set);
 
   private: void reallocTempData(int max_samples, int max_obs);
 

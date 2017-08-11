@@ -29,6 +29,7 @@
     <build_depend>roscpp</build_depend>
     <build_depend>std_srvs</build_depend>
     <build_depend>tf</build_depend>
+    <build_depend>fiducial_detector</build_depend>
 
     <run_depend>rosbag</run_depend>
     <run_depend>roscpp</run_depend>
@@ -36,6 +37,7 @@
     <run_depend>tf</run_depend>
     <run_depend>nav_msgs</run_depend>
     <run_depend>std_srvs</run_depend>
+    <run_depend>fiducial_detector</run_depend>
 
     <test_depend>rostest</test_depend>
     <test_depend>map_server</test_depend>

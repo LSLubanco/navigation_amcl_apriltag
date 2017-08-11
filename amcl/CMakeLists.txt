@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(amcl)
 
+if (NOT "$ENV{BUILD_AMCL_WITHOUT_OPTIMIZATION}" STREQUAL "")
+    string(REPLACE "-O2" "" CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_C_FLAGS_RELWITHDEBINFO})
+    string(REPLACE "-O2" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
+    message(STATUS "BUILD_AMCL_WITHOUT_OPTIMIZATION=$ENV{BUILD_AMCL_WITHOUT_OPTIMIZATION}")
+    message(STATUS "setting cmake C flags to " ${CMAKE_C_FLAGS_RELWITHDEBINFO})
+    message(STATUS "setting cmake CXX flags to " ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
+endif (NOT "$ENV{BUILD_AMCL_WITHOUT_OPTIMIZATION}" STREQUAL "")
+
 find_package(catkin REQUIRED
         COMPONENTS
             message_filters
@@ -10,6 +18,7 @@ find_package(catkin REQUIRED
             tf
             dynamic_reconfigure
             nav_msgs
+            fiducial_detector
         )
 
 find_package(Boost REQUIRED)
@@ -25,6 +34,7 @@ catkin_package(
         roscpp
         dynamic_reconfigure
         tf
+        fiducial_detector
   CATKIN_DEPENDS nav_msgs std_srvs
   INCLUDE_DIRS include
   LIBRARIES amcl_sensors amcl_map amcl_pf
@@ -51,7 +61,8 @@ add_library(amcl_map
 add_library(amcl_sensors
                     src/amcl/sensors/amcl_sensor.cpp
                     src/amcl/sensors/amcl_odom.cpp
-                    src/amcl/sensors/amcl_laser.cpp)
+                    src/amcl/sensors/amcl_laser.cpp
+                    src/amcl/sensors/amcl_fiducial.cpp)
 target_link_libraries(amcl_sensors amcl_map amcl_pf)
 
 

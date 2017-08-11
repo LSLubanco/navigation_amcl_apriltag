@@ -159,6 +159,9 @@ void pf_update_sensor(pf_t *pf, pf_sensor_model_fn_t sensor_fn, void *sensor_dat
 // Resample the distribution
 void pf_update_resample(pf_t *pf);
 
+// Re-compute the cluster statistics for a sample set
+void pf_cluster_stats(pf_t *pf, pf_sample_set_t *set);
+
 // Compute the CEP statistics (mean and variance).
 void pf_get_cep_stats(pf_t *pf, pf_vector_t *mean, double *var);
 

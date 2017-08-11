@@ -35,8 +35,10 @@
 #include "amcl/pf/pf.h"
 #include "amcl/sensors/amcl_odom.h"
 #include "amcl/sensors/amcl_laser.h"
+#include "amcl/sensors/amcl_fiducial.h"
 
 #include "ros/assert.h"
+#include <ros/console.h>
 
 // roscpp
 #include "ros/ros.h"
@@ -65,6 +67,10 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 #include <boost/foreach.hpp>
+
+// Fiducial detection
+#include <fiducial_detector/LandmarkDetectionArray.h>
+#include <fiducial_detector/LandmarkDetection.h>
 
 #define NEW_UNIFORM_SAMPLING 1
 
@@ -155,6 +161,10 @@ class AmclNode
     void initialPoseReceived(const geometry_msgs::PoseWithCovarianceStampedConstPtr& msg);
     void handleInitialPoseMessage(const geometry_msgs::PoseWithCovarianceStamped& msg);
     void mapReceived(const nav_msgs::OccupancyGridConstPtr& msg);
+    void fiducialsReceived(const fiducial_detector::LandmarkDetectionArray& msg);
+
+    void publishParticleCloud();
+    void updateAndPublishCurrentPose(const ros::Time timeStamp);
 
     void handleMapMessage(const nav_msgs::OccupancyGrid& msg);
     void freeMapDependentMemory();
@@ -188,12 +198,17 @@ class AmclNode
     int sx, sy;
     double resolution;
 
-    message_filters::Subscriber<sensor_msgs::LaserScan>* laser_scan_sub_;
-    tf::MessageFilter<sensor_msgs::LaserScan>* laser_scan_filter_;
+    std::vector<std::string> m_laserscan_topics_tokens;
+    std::vector<message_filters::Subscriber<sensor_msgs::LaserScan>* > laser_scan_subs_;
+    std::vector<tf::MessageFilter<sensor_msgs::LaserScan>* > laser_scan_filters_;
     ros::Subscriber initial_pose_sub_;
     std::vector< AMCLLaser* > lasers_;
     std::vector< bool > lasers_update_;
     std::map< std::string, int > frame_to_laser_;
+    bool m_robot_motion_detected;
+    bool m_robot_motion_detected_trigger_fiducial_update;
+
+    ros::Subscriber m_fiducialDetectionSub;
 
     // Particle filter
     pf_t *pf_;
@@ -238,6 +253,7 @@ class AmclNode
     ros::ServiceServer set_map_srv_;
     ros::Subscriber initial_pose_sub_old_;
     ros::Subscriber map_sub_;
+    ros::Subscriber fiducial_sub_;
 
     amcl_hyp_t* initial_pose_hyp_;
     bool first_map_received_;
@@ -261,6 +277,20 @@ class AmclNode
     double init_cov_[3];
     laser_model_t laser_model_type_;
     bool tf_broadcast_;
+
+    double m_fiducialDetectionUpdateInterval;
+    std::string m_fiducial_landmarks_topic;
+    double m_robotToFiducialDetectedRobotDistSkipThreshold;
+    double m_robotToFiducialDetectedRobotYawSkipThreshold;
+    double m_robotToFiducialDetectedRobotDistUpdateThreshold;
+    double m_robotToFiducialDetectedRobotYawUpdateThreshold;
+    double m_fiducial_variance_XY;
+    double m_fiducial_variance_Yaw;
+    double m_fiducialParticleSupportXYVarianceThreshold;
+    double m_fiducialParticleSupportYawVarianceThreshold;
+    double m_numFiducialParticlesSupportFraction;
+
+    ros::Time m_previousFiducialPoseUpdateTime;
 
     void reconfigureCB(amcl::AMCLConfig &config, uint32_t level);
 
@@ -290,6 +320,10 @@ main(int argc, char** argv)
 
   // Override default sigint handler
   signal(SIGINT, sigintHandler);
+
+  if (ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info)) {
+    ros::console::notifyLoggerLevelsChanged();
+  }
 
   // Make our node available to sigintHandler
   amcl_node_ptr.reset(new AmclNode());
@@ -349,10 +383,31 @@ AmclNode::AmclNode() :
   private_nh_.param("odom_alpha4", alpha4_, 0.2);
   private_nh_.param("odom_alpha5", alpha5_, 0.2);
   
+  private_nh_.param("fiducial_landmarks_topic", m_fiducial_landmarks_topic, std::string("landmark_preprocessor/landmarks"));
+  private_nh_.param("fiducial_detected_robot_dist_skip_threshold", m_robotToFiducialDetectedRobotDistSkipThreshold, 4.0);
+  private_nh_.param("fiducial_detected_robot_yaw_skip_threshold", m_robotToFiducialDetectedRobotYawSkipThreshold, M_PI/2);
+  private_nh_.param("fiducial_detected_robot_dist_update_threshold", m_robotToFiducialDetectedRobotDistUpdateThreshold, 0.75);
+  private_nh_.param("fiducial_detected_robot_yaw_update_threshold", m_robotToFiducialDetectedRobotYawUpdateThreshold, M_PI/4);
+  private_nh_.param("fiducial_variance_xy", m_fiducial_variance_XY, 0.005);
+  private_nh_.param("fiducial_variance_yaw", m_fiducial_variance_Yaw, 0.005);
+  private_nh_.param("fiducial_particle_support_xy_variance_threshold", m_fiducialParticleSupportXYVarianceThreshold, m_fiducial_variance_XY);
+  private_nh_.param("fiducial_particle_support_yaw_variance_threshold", m_fiducialParticleSupportYawVarianceThreshold, m_fiducial_variance_Yaw);
+  private_nh_.param("fiducial_num_particles_support_fraction", m_numFiducialParticlesSupportFraction, 0.05);
+  private_nh_.param("fiducial_pose_update_interval", m_fiducialDetectionUpdateInterval, 0.5);
+
   private_nh_.param("do_beamskip", do_beamskip_, false);
   private_nh_.param("beam_skip_distance", beam_skip_distance_, 0.5);
   private_nh_.param("beam_skip_threshold", beam_skip_threshold_, 0.3);
   private_nh_.param("beam_skip_error_threshold_", beam_skip_error_threshold_, 0.9);
+
+  std::string laser_scan_topics;
+  private_nh_.param("laser_scan_topics", laser_scan_topics, std::string("scan"));
+  std::istringstream iss(laser_scan_topics);
+  std::copy(std::istream_iterator<std::string>(iss), std::istream_iterator<std::string>(),
+            std::back_inserter<std::vector<std::string> >(m_laserscan_topics_tokens));
+  std::sort(m_laserscan_topics_tokens.begin(), m_laserscan_topics_tokens.end());
+  std::vector<std::string>::iterator last = std::unique(m_laserscan_topics_tokens.begin(), m_laserscan_topics_tokens.end());
+  m_laserscan_topics_tokens.erase(last, m_laserscan_topics_tokens.end());
 
   private_nh_.param("laser_z_hit", z_hit_, 0.95);
   private_nh_.param("laser_z_short", z_short_, 0.1);
@@ -367,6 +422,8 @@ AmclNode::AmclNode() :
     laser_model_type_ = LASER_MODEL_BEAM;
   else if(tmp_model_type == "likelihood_field")
     laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD;
+  else if(tmp_model_type == "likelihood_field_precise")
+    laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD_PRECISE;
   else if(tmp_model_type == "likelihood_field_prob"){
     laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD_PROB;
   }
@@ -427,14 +484,26 @@ AmclNode::AmclNode() :
   nomotion_update_srv_= nh_.advertiseService("request_nomotion_update", &AmclNode::nomotionUpdateCallback, this);
   set_map_srv_= nh_.advertiseService("set_map", &AmclNode::setMapCallback, this);
 
-  laser_scan_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(nh_, scan_topic_, 100);
-  laser_scan_filter_ = 
-          new tf::MessageFilter<sensor_msgs::LaserScan>(*laser_scan_sub_, 
-                                                        *tf_, 
-                                                        odom_frame_id_, 
-                                                        100);
-  laser_scan_filter_->registerCallback(boost::bind(&AmclNode::laserReceived,
-                                                   this, _1));
+  if (m_laserscan_topics_tokens.empty()) {
+    m_laserscan_topics_tokens.push_back(scan_topic_);
+  }
+
+  laser_scan_subs_.resize(m_laserscan_topics_tokens.size(), NULL);
+  laser_scan_filters_.resize(m_laserscan_topics_tokens.size(), NULL);
+  for (unsigned int laser_scani = 0; laser_scani < m_laserscan_topics_tokens.size(); ++laser_scani) {
+    laser_scan_subs_[laser_scani] = new message_filters::Subscriber<sensor_msgs::LaserScan>(nh_,
+                                                                                            m_laserscan_topics_tokens[laser_scani],
+                                                                                            1);
+    laser_scan_filters_[laser_scani] =
+        new tf::MessageFilter<sensor_msgs::LaserScan>(*laser_scan_subs_[laser_scani],
+                                                      *tf_,
+                                                      odom_frame_id_,
+                                                      1);
+    laser_scan_filters_[laser_scani]->registerCallback(boost::bind(&AmclNode::laserReceived,
+                                                                   this, _1));
+    ROS_INFO("Subscribed to laser scan topic '%s'.", m_laserscan_topics_tokens[laser_scani].c_str());
+  }
+
   initial_pose_sub_ = nh_.subscribe("initialpose", 2, &AmclNode::initialPoseReceived, this);
 
   if(use_map_topic_) {
@@ -444,6 +513,8 @@ AmclNode::AmclNode() :
     requestMap();
   }
   m_force_update = false;
+  m_robot_motion_detected = false;
+  m_robot_motion_detected_trigger_fiducial_update = false;
 
   dsrv_ = new dynamic_reconfigure::Server<amcl::AMCLConfig>(ros::NodeHandle("~"));
   dynamic_reconfigure::Server<amcl::AMCLConfig>::CallbackType cb = boost::bind(&AmclNode::reconfigureCB, this, _1, _2);
@@ -453,6 +524,8 @@ AmclNode::AmclNode() :
   laser_check_interval_ = ros::Duration(15.0);
   check_laser_timer_ = nh_.createTimer(laser_check_interval_, 
                                        boost::bind(&AmclNode::checkLaserReceived, this, _1));
+
+  m_fiducialDetectionSub = nh_.subscribe(m_fiducial_landmarks_topic, 1, &AmclNode::fiducialsReceived, this);
 }
 
 void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
@@ -506,6 +579,8 @@ void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
     laser_model_type_ = LASER_MODEL_BEAM;
   else if(config.laser_model_type == "likelihood_field")
     laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD;
+  else if(config.laser_model_type == "likelihood_field_precise")
+    laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD_PRECISE;
   else if(config.laser_model_type == "likelihood_field_prob")
     laser_model_type_ = LASER_MODEL_LIKELIHOOD_FIELD_PROB;
 
@@ -587,14 +662,21 @@ void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
   base_frame_id_ = config.base_frame_id;
   global_frame_id_ = config.global_frame_id;
 
-  delete laser_scan_filter_;
-  laser_scan_filter_ = 
-          new tf::MessageFilter<sensor_msgs::LaserScan>(*laser_scan_sub_, 
-                                                        *tf_, 
-                                                        odom_frame_id_, 
-                                                        100);
-  laser_scan_filter_->registerCallback(boost::bind(&AmclNode::laserReceived,
-                                                   this, _1));
+  for (unsigned int laser_scani = 0; laser_scani < m_laserscan_topics_tokens.size(); ++laser_scani) {
+    delete laser_scan_filters_[laser_scani];
+    delete laser_scan_subs_[laser_scani];
+
+    laser_scan_subs_[laser_scani] = new message_filters::Subscriber<sensor_msgs::LaserScan>(nh_,
+                                                                                            m_laserscan_topics_tokens[laser_scani],
+                                                                                            100);
+    laser_scan_filters_[laser_scani] =
+        new tf::MessageFilter<sensor_msgs::LaserScan>(*laser_scan_subs_[laser_scani],
+                                                      *tf_,
+                                                      odom_frame_id_,
+                                                      100);
+    laser_scan_filters_[laser_scani]->registerCallback(boost::bind(&AmclNode::laserReceived,
+                                                                   this, _1));
+  }
 
   initial_pose_sub_ = nh_.subscribe("initialpose", 2, &AmclNode::initialPoseReceived, this);
 }
@@ -658,7 +740,7 @@ void AmclNode::runFromBag(const std::string &in_bag_fn)
     if (base_scan != NULL)
     {
       laser_pub.publish(msg);
-      laser_scan_filter_->add(base_scan);
+      laser_scan_filters_.front()->add(base_scan);
       if (bag_scan_period_ > ros::WallDuration(0))
       {
         bag_scan_period_.sleep();
@@ -755,11 +837,15 @@ void
 AmclNode::checkLaserReceived(const ros::TimerEvent& event)
 {
   ros::Duration d = ros::Time::now() - last_laser_received_ts_;
-  if(d > laser_check_interval_)
+ if(d > laser_check_interval_)
   {
-    ROS_WARN("No laser scan received (and thus no pose updates have been published) for %f seconds.  Verify that data is being published on the %s topic.",
+    std::stringstream ss;
+    for (int laser_scani = 0; laser_scani < m_laserscan_topics_tokens.size(); ++laser_scani) {
+      ss << ros::names::resolve(m_laserscan_topics_tokens[laser_scani]) << " ";
+    }
+    ROS_WARN("No laser scan received (and thus no pose updates have been published) for %f seconds.  Verify that data is being published on these %s topics.",
              d.toSec(),
-             ros::names::resolve(scan_topic_).c_str());
+             ss.str().c_str());
   }
 }
 
@@ -928,8 +1014,10 @@ AmclNode::~AmclNode()
 {
   delete dsrv_;
   freeMapDependentMemory();
-  delete laser_scan_filter_;
-  delete laser_scan_sub_;
+  for (unsigned int laser_scani = 0; laser_scani < m_laserscan_topics_tokens.size(); ++laser_scani) {
+    delete laser_scan_filters_[laser_scani];
+    delete laser_scan_subs_[laser_scani];
+  }
   delete tfb_;
   delete tf_;
   // TODO: delete everything allocated in constructor
@@ -1035,6 +1123,360 @@ AmclNode::setMapCallback(nav_msgs::SetMap::Request& req,
   return true;
 }
 
+bool getTransform(tf::TransformListener* transformListener, const std::string& target_frame, const ros::Time& target_time,
+                  const std::string& source_frame, const ros::Time& source_time, const std::string& fixed_frame,
+                  const unsigned int maxFailures, tf::StampedTransform& outputTf) {
+  int lookupFailures = 0;
+  bool foundTransforms = false;
+  ros::Duration checkRate(0.02);
+  char errorStr[1000];
+  while (!ros::isShuttingDown() && lookupFailures < maxFailures) {
+    try {
+      if (fixed_frame.empty()) {
+        transformListener->waitForTransform(target_frame, source_frame, target_time, checkRate);
+        transformListener->lookupTransform(target_frame, source_frame, target_time, outputTf);
+      } else {
+        transformListener->waitForTransform(target_frame, target_time, source_frame, source_time, fixed_frame, checkRate);
+        transformListener->lookupTransform(target_frame, target_time, source_frame, source_time, fixed_frame, outputTf);
+      }
+      foundTransforms = true;
+      break;
+    } catch (tf::ConnectivityException& e) {
+      snprintf(errorStr, 1000, "Connectivity exception: %s", e.what());
+    } catch (tf::ExtrapolationException& e) {
+      snprintf(errorStr, 1000, "Extrapolation exception: %s", e.what());
+    } catch (tf::InvalidArgument& e) {
+      snprintf(errorStr, 1000, "Invalid argument exception: %s", e.what());
+    } catch (tf::LookupException& e) {
+      snprintf(errorStr, 1000, "Lookup exception: %s", e.what());
+    }
+    lookupFailures += 1;
+  }
+
+  if (!foundTransforms) {
+    ROS_WARN("%s->%s failed %s", target_frame.c_str(), source_frame.c_str(), errorStr);
+  } else {
+    ROS_DEBUG("%s->%s success in %d trials", target_frame.c_str(), source_frame.c_str(), lookupFailures);
+  }
+  return foundTransforms;
+}
+
+void AmclNode::fiducialsReceived(const fiducial_detector::LandmarkDetectionArray& landmarkArray) {
+  if (landmarkArray.landmarks.empty()) {
+    return;
+  }
+
+  boost::recursive_mutex::scoped_lock fr(configuration_mutex_);
+  if (map_ == NULL || pf_ == NULL) {
+    return;
+  }
+
+  ros::Time currentTime = ros::Time::now();
+  if ((currentTime - m_previousFiducialPoseUpdateTime).toSec() < m_fiducialDetectionUpdateInterval) {
+    return;
+  }
+
+  char fiducialDebugStr[5000];
+  char *fiducialDebugPtr = fiducialDebugStr;
+
+  tf::StampedTransform robotImageGrabbedToRobotCurrentTf;
+  bool robotImageGrabbedToRobotCurrentTfSuccess = getTransform(tf_, base_frame_id_, landmarkArray.header.stamp, base_frame_id_,
+                                                               currentTime, odom_frame_id_, 10, robotImageGrabbedToRobotCurrentTf);
+
+  fiducialDebugPtr += sprintf(fiducialDebugPtr, "(%s:%.4f)->(%s:%.4f) ", base_frame_id_.c_str(), landmarkArray.header.stamp.toSec(),
+                              base_frame_id_.c_str(), currentTime.toSec());
+  if (robotImageGrabbedToRobotCurrentTfSuccess) {
+    geometry_msgs::Pose robotImageGrabbedToRobotCurrentPose;
+    tf::poseTFToMsg(robotImageGrabbedToRobotCurrentTf, robotImageGrabbedToRobotCurrentPose);
+    fiducialDebugPtr += sprintf(fiducialDebugPtr, "(%.3f, %.3f, %.3f)", robotImageGrabbedToRobotCurrentPose.position.x,
+                                robotImageGrabbedToRobotCurrentPose.position.y,
+                                tf::getYaw(robotImageGrabbedToRobotCurrentPose.orientation));
+    ROS_DEBUG("%s:%d %s", __FUNCTION__, __LINE__, fiducialDebugStr);
+  } else {
+    fiducialDebugPtr += sprintf(fiducialDebugPtr, "failed");
+  }
+
+  double robotToDetectedRobotMinDist = FLT_MAX;
+  double robotToDetectedRobotMinYaw = FLT_MAX;
+  fiducialDebugPtr = fiducialDebugStr;
+  fiducialDebugPtr += sprintf(fiducialDebugPtr, "diff(robot->robot_fiducial): ");
+
+  AMCLFiducialData fiducialData;
+  bool transformExceptionsPresent = false;
+  for (std::vector<fiducial_detector::LandmarkDetection>::const_iterator cur_landmark = landmarkArray.landmarks.begin();
+      cur_landmark != landmarkArray.landmarks.end(); cur_landmark++) {
+
+    int cur_landmark_id;
+    sscanf(cur_landmark->detected_pose.header.frame_id.c_str(), "%d", &cur_landmark_id);
+    char detectedRobotFrame[500];
+    snprintf(detectedRobotFrame, 500, "robot_landmark_%05d", cur_landmark_id);
+
+    tf::StampedTransform detectedRobotTf;
+    if (getTransform(tf_, global_frame_id_, landmarkArray.header.stamp, detectedRobotFrame, ros::Time(0), "", 10, detectedRobotTf)) {
+
+      ros::Duration tfDuration = currentTime - detectedRobotTf.stamp_;
+      if (std::fabs(tfDuration.toSec()) < 0.5) {
+        if (robotImageGrabbedToRobotCurrentTfSuccess) {
+          detectedRobotTf.mult(detectedRobotTf, robotImageGrabbedToRobotCurrentTf);
+        }
+
+        FiducialPoint fiducialDetection;
+        fiducialDetection.id = cur_landmark_id;
+        tf::poseTFToMsg(detectedRobotTf, fiducialDetection.detected_robot_pose);
+        fiducialDetection.detected_landmark_pose = cur_landmark->detected_pose.pose.pose;
+        fiducialDetection.distance_uncertainty = 0;
+        fiducialDetection.bearing_uncertainty = 0;
+
+        if (initial_pose_hyp_ == NULL) {
+          fiducialData.fiducials.push_back(fiducialDetection);
+        } else {
+          tf::StampedTransform robotToDetectedRobotTf;
+          if (getTransform(tf_, base_frame_id_, ros::Time(0), detectedRobotFrame, ros::Time(0), "", 10, robotToDetectedRobotTf)) {
+
+            geometry_msgs::Pose robotToDetectedRobotPose;
+            tf::poseTFToMsg(robotToDetectedRobotTf, robotToDetectedRobotPose);
+
+            double robotToDetectedRobotDist = std::sqrt(
+                std::pow(robotToDetectedRobotPose.position.x, 2) + std::pow(robotToDetectedRobotPose.position.y, 2));
+            double robotToDetectedRobotYaw = std::abs(tf::getYaw(robotToDetectedRobotPose.orientation));
+            fiducialDebugPtr += sprintf(fiducialDebugPtr, "(%d %.4f %.4f)", cur_landmark_id, robotToDetectedRobotDist,
+                                        robotToDetectedRobotYaw);
+
+            robotToDetectedRobotMinDist = std::min(robotToDetectedRobotMinDist, robotToDetectedRobotDist);
+            robotToDetectedRobotMinYaw = std::min(robotToDetectedRobotMinYaw, robotToDetectedRobotYaw);
+
+            if (robotToDetectedRobotDist < m_robotToFiducialDetectedRobotDistSkipThreshold
+                && robotToDetectedRobotYaw < m_robotToFiducialDetectedRobotYawSkipThreshold) {
+              fiducialData.fiducials.push_back(fiducialDetection);
+            } else {
+              ROS_WARN(
+                  "%s:%d Fiducial robot pose (id: %d) too far from current robot pose (%f > %f || %f > %f) skipping fiducial update.",
+                  __FUNCTION__, __LINE__, cur_landmark_id, robotToDetectedRobotDist,
+                  m_robotToFiducialDetectedRobotDistSkipThreshold, robotToDetectedRobotYaw,
+                  m_robotToFiducialDetectedRobotYawSkipThreshold);
+            }
+          } else {
+            ROS_DEBUG("%s:%d TF %s->%s at time %.5f failed", __FUNCTION__, __LINE__, base_frame_id_.c_str(), detectedRobotFrame,
+                      currentTime.toSec());
+          }
+        }
+      } else {
+        ROS_DEBUG("%s:%d detectedFiducialFrame is too old (time_diff = %.5f), skipping this frame (%s).", __FUNCTION__, __LINE__,
+                  tfDuration.toSec(), detectedRobotFrame);
+      }
+    } else {
+      transformExceptionsPresent = true;
+      ROS_WARN("%s:%d TF %s->%s at time %.5f failed", __FUNCTION__, __LINE__, global_frame_id_.c_str(), detectedRobotFrame,
+                landmarkArray.header.stamp.toSec());
+    }
+  }
+
+  if (!fiducialData.fiducials.empty()) {
+    ROS_DEBUG("%s:%d %s, (%.4f %.4f)", __FUNCTION__, __LINE__, fiducialDebugStr, robotToDetectedRobotMinDist, robotToDetectedRobotMinYaw);
+
+    bool pose_initialized = false;
+    if (initial_pose_hyp_ == NULL) {
+      const geometry_msgs::Pose detected_robot_pose = fiducialData.fiducials.front().detected_robot_pose;
+      // Re-initialize the filter
+      pf_vector_t pf_init_pose_mean = pf_vector_zero();
+      pf_init_pose_mean.v[0] = detected_robot_pose.position.x;
+      pf_init_pose_mean.v[1] = detected_robot_pose.position.y;
+      pf_init_pose_mean.v[2] = tf::getYaw(detected_robot_pose.orientation);
+
+      ROS_INFO("Setting pose (%.6f): %.3f %.3f %.3f", currentTime.toSec(), pf_init_pose_mean.v[0], pf_init_pose_mean.v[1],
+               pf_init_pose_mean.v[2]);
+
+      pf_matrix_t pf_init_pose_cov = pf_matrix_zero();
+      pf_init_pose_cov.m[0][0] = 2 * m_fiducial_variance_XY;
+      pf_init_pose_cov.m[1][1] = 2 * m_fiducial_variance_XY;
+      pf_init_pose_cov.m[2][2] = 2 * m_fiducial_variance_Yaw;
+
+      initial_pose_hyp_ = new amcl_hyp_t();
+      initial_pose_hyp_->pf_pose_mean = pf_init_pose_mean;
+      initial_pose_hyp_->pf_pose_cov = pf_init_pose_cov;
+      applyInitialPose();
+
+      pose_initialized = true;
+    }
+
+    if (pose_initialized || m_robot_motion_detected_trigger_fiducial_update
+        || robotToDetectedRobotMinDist > m_robotToFiducialDetectedRobotDistUpdateThreshold
+        || robotToDetectedRobotMinYaw > m_robotToFiducialDetectedRobotYawUpdateThreshold) {
+
+      m_robot_motion_detected_trigger_fiducial_update = false;
+      m_previousFiducialPoseUpdateTime = currentTime;
+
+      AMCLFiducial fiducialSensorData(m_fiducial_variance_XY, m_fiducial_variance_Yaw, m_fiducialParticleSupportXYVarianceThreshold,
+                                      m_fiducialParticleSupportYawVarianceThreshold, m_numFiducialParticlesSupportFraction);
+
+      fiducialData.sensor = (AMCLSensor*) &fiducialSensorData;
+      fiducialData.time = currentTime.toSec();
+
+      ++resample_count_;
+      fiducialSensorData.UpdatePfWithFiducialDetections(pf_, &fiducialData);
+
+      publishParticleCloud();
+      updateAndPublishCurrentPose(ros::Time::now());
+    }
+  } else if (transformExceptionsPresent) {
+    publishParticleCloud();
+    updateAndPublishCurrentPose(ros::Time::now());
+  }
+}
+
+void AmclNode::publishParticleCloud() {
+  pf_sample_set_t* set = pf_->sets + pf_->current_set;
+  geometry_msgs::PoseArray cloud_msg;
+  cloud_msg.header.stamp = ros::Time::now();
+  cloud_msg.header.frame_id = global_frame_id_;
+  cloud_msg.poses.resize(set->sample_count);
+  for (int i = 0; i < set->sample_count; i++) {
+    tf::poseTFToMsg(
+        tf::Pose(tf::createQuaternionFromYaw(set->samples[i].pose.v[2]),
+                 tf::Vector3(set->samples[i].pose.v[0], set->samples[i].pose.v[1], -0.25)),
+        cloud_msg.poses[i]);
+  }
+  particlecloud_pub_.publish(cloud_msg);
+}
+
+void AmclNode::updateAndPublishCurrentPose(const ros::Time timeStamp) {
+  // Read out the current hypotheses
+  double max_weight = 0.0;
+  int max_weight_hyp = -1;
+  std::vector<amcl_hyp_t> hyps;
+  hyps.resize(pf_->sets[pf_->current_set].cluster_count);
+  for(int hyp_count = 0;
+      hyp_count < pf_->sets[pf_->current_set].cluster_count; hyp_count++)
+  {
+    double weight;
+    pf_vector_t pose_mean;
+    pf_matrix_t pose_cov;
+    if (!pf_get_cluster_stats(pf_, hyp_count, &weight, &pose_mean, &pose_cov))
+    {
+      ROS_ERROR("Couldn't get stats on cluster %d", hyp_count);
+      break;
+    }
+
+    hyps[hyp_count].weight = weight;
+    hyps[hyp_count].pf_pose_mean = pose_mean;
+    hyps[hyp_count].pf_pose_cov = pose_cov;
+
+    if(hyps[hyp_count].weight > max_weight)
+    {
+      max_weight = hyps[hyp_count].weight;
+      max_weight_hyp = hyp_count;
+    }
+  }
+
+  if(max_weight > 0.0)
+  {
+    ROS_DEBUG("Max weight pose: %.3f %.3f %.3f",
+              hyps[max_weight_hyp].pf_pose_mean.v[0],
+              hyps[max_weight_hyp].pf_pose_mean.v[1],
+              hyps[max_weight_hyp].pf_pose_mean.v[2]);
+
+    /*
+       puts("");
+       pf_matrix_fprintf(hyps[max_weight_hyp].pf_pose_cov, stdout, "%6.3f");
+       puts("");
+     */
+
+    geometry_msgs::PoseWithCovarianceStamped p;
+    // Fill in the header
+    p.header.frame_id = global_frame_id_;
+    p.header.stamp = timeStamp;
+    // Copy in the pose
+    p.pose.pose.position.x = hyps[max_weight_hyp].pf_pose_mean.v[0];
+    p.pose.pose.position.y = hyps[max_weight_hyp].pf_pose_mean.v[1];
+    tf::quaternionTFToMsg(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
+                          p.pose.pose.orientation);
+    // Copy in the covariance, converting from 3-D to 6-D
+    pf_sample_set_t* set = pf_->sets + pf_->current_set;
+    for(int i=0; i<2; i++)
+    {
+      for(int j=0; j<2; j++)
+      {
+        // Report the overall filter covariance, rather than the
+        // covariance for the highest-weight cluster
+        //p.covariance[6*i+j] = hyps[max_weight_hyp].pf_pose_cov.m[i][j];
+        p.pose.covariance[6*i+j] = set->cov.m[i][j];
+      }
+    }
+    // Report the overall filter covariance, rather than the
+    // covariance for the highest-weight cluster
+    //p.covariance[6*5+5] = hyps[max_weight_hyp].pf_pose_cov.m[2][2];
+    p.pose.covariance[6*5+5] = set->cov.m[2][2];
+
+    /*
+       printf("cov:\n");
+       for(int i=0; i<6; i++)
+       {
+       for(int j=0; j<6; j++)
+       printf("%6.3f ", p.covariance[6*i+j]);
+       puts("");
+       }
+     */
+
+    pose_pub_.publish(p);
+    last_published_pose = p;
+
+    ROS_DEBUG("New pose: %6.3f %6.3f %6.3f",
+             hyps[max_weight_hyp].pf_pose_mean.v[0],
+             hyps[max_weight_hyp].pf_pose_mean.v[1],
+             hyps[max_weight_hyp].pf_pose_mean.v[2]);
+
+    // subtracting base to odom from map to base and send map to odom instead
+    tf::Stamped<tf::Pose> odom_to_map;
+    try
+    {
+      tf::Transform tmp_tf(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
+                           tf::Vector3(hyps[max_weight_hyp].pf_pose_mean.v[0],
+                                       hyps[max_weight_hyp].pf_pose_mean.v[1],
+                                       0.0));
+      tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
+                                            timeStamp,
+                                            base_frame_id_);
+      this->tf_->transformPose(odom_frame_id_,
+                               tmp_tf_stamped,
+                               odom_to_map);
+    }
+    catch(tf::TransformException)
+    {
+      ROS_DEBUG("Failed to subtract base to odom transform");
+      return;
+    }
+
+    latest_tf_ = tf::Transform(tf::Quaternion(odom_to_map.getRotation()),
+                               tf::Point(odom_to_map.getOrigin()));
+    latest_tf_valid_ = true;
+
+    if (tf_broadcast_ == true)
+    {
+      // We want to send a transform that is good up until a
+      // tolerance time so that odom can be used
+      ros::Time transform_expiration = (timeStamp +
+                                        transform_tolerance_);
+      tf::StampedTransform tmp_tf_stamped(latest_tf_.inverse(),
+                                          transform_expiration,
+                                          global_frame_id_, odom_frame_id_);
+      if (std::isnan(tmp_tf_stamped.getOrigin().getX()) || std::isnan(tmp_tf_stamped.getOrigin().getY())
+         || std::isnan(tmp_tf_stamped.getOrigin().getZ()) || std::isnan(tmp_tf_stamped.getRotation().getW())
+         || std::isnan(tmp_tf_stamped.getRotation().getX()) || std::isnan(tmp_tf_stamped.getRotation().getY())
+         || std::isnan(tmp_tf_stamped.getRotation().getZ())) {
+        ROS_WARN_THROTTLE(1, "AMCL has a nan tf.  Sending identity instead.");
+        tmp_tf_stamped.setIdentity();
+      }
+      this->tfb_->sendTransform(tmp_tf_stamped);
+      sent_first_transform_ = true;
+    }
+  }
+  else
+  {
+    ROS_ERROR("No pose!");
+  }
+}
+
+
 void
 AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
 {
@@ -1108,10 +1550,15 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
     delta.v[2] = angle_diff(pose.v[2], pf_odom_pose_.v[2]);
 
     // See if we should update the filter
-    bool update = fabs(delta.v[0]) > d_thresh_ ||
-                  fabs(delta.v[1]) > d_thresh_ ||
-                  fabs(delta.v[2]) > a_thresh_;
-    update = update || m_force_update;
+   m_robot_motion_detected = fabs(delta.v[0]) > d_thresh_ ||
+                              fabs(delta.v[1]) > d_thresh_ ||
+                              fabs(delta.v[2]) > a_thresh_;
+
+    if (m_robot_motion_detected) {
+      m_robot_motion_detected_trigger_fiducial_update = true;
+    }
+
+    bool update = m_robot_motion_detected || m_force_update;
     m_force_update=false;
 
     // Set the laser update flags
@@ -1241,150 +1688,13 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
     // Publish the resulting cloud
     // TODO: set maximum rate for publishing
     if (!m_force_update) {
-      geometry_msgs::PoseArray cloud_msg;
-      cloud_msg.header.stamp = ros::Time::now();
-      cloud_msg.header.frame_id = global_frame_id_;
-      cloud_msg.poses.resize(set->sample_count);
-      for(int i=0;i<set->sample_count;i++)
-      {
-        tf::poseTFToMsg(tf::Pose(tf::createQuaternionFromYaw(set->samples[i].pose.v[2]),
-                                 tf::Vector3(set->samples[i].pose.v[0],
-                                           set->samples[i].pose.v[1], 0)),
-                        cloud_msg.poses[i]);
-      }
-      particlecloud_pub_.publish(cloud_msg);
+      publishParticleCloud();
     }
   }
 
   if(resampled || force_publication)
   {
-    // Read out the current hypotheses
-    double max_weight = 0.0;
-    int max_weight_hyp = -1;
-    std::vector<amcl_hyp_t> hyps;
-    hyps.resize(pf_->sets[pf_->current_set].cluster_count);
-    for(int hyp_count = 0;
-        hyp_count < pf_->sets[pf_->current_set].cluster_count; hyp_count++)
-    {
-      double weight;
-      pf_vector_t pose_mean;
-      pf_matrix_t pose_cov;
-      if (!pf_get_cluster_stats(pf_, hyp_count, &weight, &pose_mean, &pose_cov))
-      {
-        ROS_ERROR("Couldn't get stats on cluster %d", hyp_count);
-        break;
-      }
-
-      hyps[hyp_count].weight = weight;
-      hyps[hyp_count].pf_pose_mean = pose_mean;
-      hyps[hyp_count].pf_pose_cov = pose_cov;
-
-      if(hyps[hyp_count].weight > max_weight)
-      {
-        max_weight = hyps[hyp_count].weight;
-        max_weight_hyp = hyp_count;
-      }
-    }
-
-    if(max_weight > 0.0)
-    {
-      ROS_DEBUG("Max weight pose: %.3f %.3f %.3f",
-                hyps[max_weight_hyp].pf_pose_mean.v[0],
-                hyps[max_weight_hyp].pf_pose_mean.v[1],
-                hyps[max_weight_hyp].pf_pose_mean.v[2]);
-
-      /*
-         puts("");
-         pf_matrix_fprintf(hyps[max_weight_hyp].pf_pose_cov, stdout, "%6.3f");
-         puts("");
-       */
-
-      geometry_msgs::PoseWithCovarianceStamped p;
-      // Fill in the header
-      p.header.frame_id = global_frame_id_;
-      p.header.stamp = laser_scan->header.stamp;
-      // Copy in the pose
-      p.pose.pose.position.x = hyps[max_weight_hyp].pf_pose_mean.v[0];
-      p.pose.pose.position.y = hyps[max_weight_hyp].pf_pose_mean.v[1];
-      tf::quaternionTFToMsg(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
-                            p.pose.pose.orientation);
-      // Copy in the covariance, converting from 3-D to 6-D
-      pf_sample_set_t* set = pf_->sets + pf_->current_set;
-      for(int i=0; i<2; i++)
-      {
-        for(int j=0; j<2; j++)
-        {
-          // Report the overall filter covariance, rather than the
-          // covariance for the highest-weight cluster
-          //p.covariance[6*i+j] = hyps[max_weight_hyp].pf_pose_cov.m[i][j];
-          p.pose.covariance[6*i+j] = set->cov.m[i][j];
-        }
-      }
-      // Report the overall filter covariance, rather than the
-      // covariance for the highest-weight cluster
-      //p.covariance[6*5+5] = hyps[max_weight_hyp].pf_pose_cov.m[2][2];
-      p.pose.covariance[6*5+5] = set->cov.m[2][2];
-
-      /*
-         printf("cov:\n");
-         for(int i=0; i<6; i++)
-         {
-         for(int j=0; j<6; j++)
-         printf("%6.3f ", p.covariance[6*i+j]);
-         puts("");
-         }
-       */
-
-      pose_pub_.publish(p);
-      last_published_pose = p;
-
-      ROS_DEBUG("New pose: %6.3f %6.3f %6.3f",
-               hyps[max_weight_hyp].pf_pose_mean.v[0],
-               hyps[max_weight_hyp].pf_pose_mean.v[1],
-               hyps[max_weight_hyp].pf_pose_mean.v[2]);
-
-      // subtracting base to odom from map to base and send map to odom instead
-      tf::Stamped<tf::Pose> odom_to_map;
-      try
-      {
-        tf::Transform tmp_tf(tf::createQuaternionFromYaw(hyps[max_weight_hyp].pf_pose_mean.v[2]),
-                             tf::Vector3(hyps[max_weight_hyp].pf_pose_mean.v[0],
-                                         hyps[max_weight_hyp].pf_pose_mean.v[1],
-                                         0.0));
-        tf::Stamped<tf::Pose> tmp_tf_stamped (tmp_tf.inverse(),
-                                              laser_scan->header.stamp,
-                                              base_frame_id_);
-        this->tf_->transformPose(odom_frame_id_,
-                                 tmp_tf_stamped,
-                                 odom_to_map);
-      }
-      catch(tf::TransformException)
-      {
-        ROS_DEBUG("Failed to subtract base to odom transform");
-        return;
-      }
-
-      latest_tf_ = tf::Transform(tf::Quaternion(odom_to_map.getRotation()),
-                                 tf::Point(odom_to_map.getOrigin()));
-      latest_tf_valid_ = true;
-
-      if (tf_broadcast_ == true)
-      {
-        // We want to send a transform that is good up until a
-        // tolerance time so that odom can be used
-        ros::Time transform_expiration = (laser_scan->header.stamp +
-                                          transform_tolerance_);
-        tf::StampedTransform tmp_tf_stamped(latest_tf_.inverse(),
-                                            transform_expiration,
-                                            global_frame_id_, odom_frame_id_);
-        this->tfb_->sendTransform(tmp_tf_stamped);
-        sent_first_transform_ = true;
-      }
-    }
-    else
-    {
-      ROS_ERROR("No pose!");
-    }
+    updateAndPublishCurrentPose(laser_scan->header.stamp);
   }
   else if(latest_tf_valid_)
   {
@@ -1397,6 +1707,13 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       tf::StampedTransform tmp_tf_stamped(latest_tf_.inverse(),
                                           transform_expiration,
                                           global_frame_id_, odom_frame_id_);
+      if (std::isnan(tmp_tf_stamped.getOrigin().getX()) || std::isnan(tmp_tf_stamped.getOrigin().getY())
+         || std::isnan(tmp_tf_stamped.getOrigin().getZ()) || std::isnan(tmp_tf_stamped.getRotation().getW())
+         || std::isnan(tmp_tf_stamped.getRotation().getX()) || std::isnan(tmp_tf_stamped.getRotation().getY())
+         || std::isnan(tmp_tf_stamped.getRotation().getZ())) {
+        ROS_WARN_THROTTLE(1, "AMCL has a nan tf.  Sending identity instead.");
+        tmp_tf_stamped.setIdentity();
+      }
       this->tfb_->sendTransform(tmp_tf_stamped);
     }
 
@@ -1515,8 +1832,5 @@ AmclNode::applyInitialPose()
   if( initial_pose_hyp_ != NULL && map_ != NULL ) {
     pf_init(pf_, initial_pose_hyp_->pf_pose_mean, initial_pose_hyp_->pf_pose_cov);
     pf_init_ = false;
-
-    delete initial_pose_hyp_;
-    initial_pose_hyp_ = NULL;
   }
 }

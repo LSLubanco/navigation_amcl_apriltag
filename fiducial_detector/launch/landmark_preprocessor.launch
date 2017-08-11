@@ -1,0 +1,21 @@
+<launch>
+
+  <arg name="preprocess_machine" />
+  <arg name="landmark_map_file" />
+  <arg name="first_fiducial_detector_node" />
+  <arg name="second_fiducial_detector_node"       default="" />
+
+  <arg name="run_in_gdb"                          default="false"/>
+  <arg name="launch-prefix"                       value="screen -d -m gdb -ex run --args" if="$(arg run_in_gdb)" />
+  <arg name="launch-prefix"                       value=""                                unless="$(arg run_in_gdb)" />
+  <arg name="respawn_landmark_preprocessor"       value="false"                           if="$(arg run_in_gdb)" />
+  <arg name="respawn_landmark_preprocessor"       value="true"                            unless="$(arg run_in_gdb)" />
+
+  <node name="landmark_preprocessor" type="landmark_preprocessor" pkg="fiducial_detector" machine="$(arg preprocess_machine)"
+        output="screen" launch-prefix="$(arg launch-prefix)" respawn="$(arg respawn_landmark_preprocessor)" >
+    <param name="landmark_map_file"               value="$(arg landmark_map_file)" />
+    <param name="first_fiducial_detector_node"    value="$(arg first_fiducial_detector_node)" />
+    <param name="second_fiducial_detector_node"   value="$(arg second_fiducial_detector_node)" />
+    <param name="landmark_output_topic"           value="landmarks" />
+  </node>
+</launch>

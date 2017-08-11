@@ -39,10 +39,6 @@
 // with samples in them.
 static int pf_resample_limit(pf_t *pf, int k);
 
-// Re-compute the cluster statistics for a sample set
-static void pf_cluster_stats(pf_t *pf, pf_sample_set_t *set);
-
-
 // Create a new filter
 pf_t *pf_alloc(int min_samples, int max_samples,
                double alpha_slow, double alpha_fast,
@@ -398,14 +394,13 @@ void pf_update_resample(pf_t *pf)
         if((c[i] <= r) && (r < c[i+1]))
           break;
       }
-      assert(i<set_a->sample_count);
-
-      sample_a = set_a->samples + i;
-
-      assert(sample_a->weight > 0);
-
-      // Add sample to list
-      sample_b->pose = sample_a->pose;
+      if (i<set_a->sample_count) {
+        sample_a = set_a->samples + i;
+        if (sample_a->weight > 0) {
+          // Add sample to list
+          sample_b->pose = sample_a->pose;
+        }
+      }
     }
 
     sample_b->weight = 1.0;

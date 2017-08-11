@@ -1,0 +1,10 @@
+---
+frame_id : /datum_origin
+landmarks:
+  - id    : 5
+    Translation: [7.015, 11.599, 0.169]
+    RPY: [1.586, 0.015, 1.611]
+
+  - id    : 6
+    Translation: [5.791, 18.841, 0.298]
+    RPY: [1.566, -0.005, -1.517]

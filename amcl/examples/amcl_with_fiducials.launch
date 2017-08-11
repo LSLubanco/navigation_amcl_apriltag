@@ -1,0 +1,105 @@
+<launch>
+
+  <arg name="amcl_machine"/>
+  <arg name="laser_topic"/>
+  <arg name="world_frame"                      default="datum_origin" />
+
+  <arg name="run_in_gdb"                       default="$(optenv RUN_AMCL_IN_GDB false)" />
+  <arg name="launch-prefix"                    value="screen -d -m gdb -ex run --args" if="$(arg run_in_gdb)" />
+  <arg name="launch-prefix"                    value=""                                unless="$(arg run_in_gdb)" />
+  <arg name="respawn_amcl"                     value="false"                           if="$(arg run_in_gdb)" />
+  <arg name="respawn_amcl"                     value="true"                            unless="$(arg run_in_gdb)" />
+
+  <!-- Run amcl for localization -->
+  <!-- Refer to the link below for understanding the params usage:
+       http://wiki.ros.org/amcl#Parameters
+  -->
+  <node pkg="amcl" type="amcl" name="amcl" output="screen" machine="$(arg amcl_machine)"
+        launch-prefix="$(arg launch-prefix)" respawn="$(arg respawn_amcl)" >
+    <param name="base_frame_id"                                     value="robot"/>
+    <param name="global_frame_id"                                   value="$(arg world_frame)"/>
+    <param name="gui_publish_rate"                                  value="1.0"/>
+    <param name="kld_err"                                           value="0.01"/>
+    <param name="kld_z"                                             value="0.79"/>
+    <param name="laser_lambda_short"                                value="0.5"/>
+    <param name="laser_scan_topics"                                 value="$(arg laser_topic)" />
+    <param name="laser_likelihood_max_dist"                         value="5.0"/>
+    <param name="laser_max_beams"                                   value="100"/>
+    <param name="laser_model_type"                                  value="likelihood_field"/>
+    <param name="laser_sigma_hit"                                   value="0.15"/>
+    <param name="laser_z_hit"                                       value="0.4"/>
+    <param name="laser_z_max"                                       value="0.01"/>
+    <param name="laser_z_rand"                                      value="0.6"/>
+    <param name="laser_z_short"                                     value="0.1"/>
+    <param name="max_particles"                                     value="10000"/>
+    <param name="min_particles"                                     value="2000"/>
+    <param name="odom_alpha1"                                       value="0.6"/>
+    <param name="odom_alpha2"                                       value="0.6"/>
+    <param name="odom_alpha3"                                       value="1.6"/>
+    <param name="odom_alpha4"                                       value="0.6"/>
+    <param name="odom_frame_id"                                     value="odom_combined"/>
+    <param name="odom_model_type"                                   value="diff"/>
+    <param name="recovery_alpha_fast"                               value="0.1"/>
+    <param name="recovery_alpha_slow"                               value="0.1"/>
+    <param name="save_pose_rate"                                    value="-1.0"/>
+    <param name="transform_tolerance"                               value="1.0"/>
+    <param name="update_min_a"                                      value="0.1"/>
+    <param name="update_min_d"                                      value="0.1"/>
+    <param name="use_map_topic"                                     value="true"/>
+    <param name="fiducial_landmarks_topic"                          value="/landmark_preprocessor/landmarks"/>
+    <param name="fiducial_detected_robot_dist_skip_threshold"       value="5.0"/>
+    <param name="fiducial_detected_robot_yaw_skip_threshold"        value="1.5708"/>
+    <param name="fiducial_detected_robot_dist_update_threshold"     value="0.75"/>
+    <param name="fiducial_detected_robot_yaw_update_threshold"      value="0.78"/>
+    <param name="fiducial_variance_xy"                              value="0.01"/>
+    <param name="fiducial_variance_yaw"                             value="0.02"/>
+    <param name="fiducial_particle_support_xy_variance_threshold"   value="0.05"/>
+    <param name="fiducial_particle_support_yaw_variance_threshold"  value="0.1"/>
+    <param name="fiducial_num_particles_support_fraction"           value="0.3"/>
+    <param name="fiducial_pose_update_interval"                     value="0.3"/>
+  </node>
+
+  <machine name="local" address="localhost" default="true" />
+
+  <!-- Fiducial detector and landmark preprocessor -->
+  <arg name="use_fiducial_detector"                       default="true" />
+  <arg name="fiducial_detector_use_first_camera"          default="true" />
+  <arg name="fiducial_detector_first_camera_machine"      default="local" />
+  <arg name="fiducial_detector_first_camera_name"         default="pointgrey_right" />
+  <arg name="fiducial_detector_first_camera_serial"       default="0" />
+  <arg name="fiducial_detector_first_camera_xyz_ypr"      default="0.2137; -0.2627; 0.2241 0 0.0 1.5708" />
+  <arg name="fiducial_detector_use_second_camera"         default="true" />
+  <arg name="fiducial_detector_second_camera_machine"     default="local" />
+  <arg name="fiducial_detector_second_camera_name"        default="pointgrey_left" />
+  <arg name="fiducial_detector_second_camera_serial"      default="0" />
+  <arg name="fiducial_detector_second_camera_xyz_ypr"     default="-0.6201; 0.2627; 0.2242 3.1416 0.0 1.5708" />
+  <arg name="fiducial_detector_use_default_camera_params" default="true" />
+  <arg name="use_landmark_preprocessor"                   default="true"/>
+  <arg name="fiducial_detector_landmarks_map_file"        default="$(find fiducial_detector)/maps/sample_map.yaml" />
+  <arg name="april_tag_size"                              default="0.415" />
+  <arg name="relay_second_camera_topics"                  default="true" />
+  <arg name="fiducial_detector_in_gdb"                    default="false"/>
+  <arg name="landmark_preprocessor_in_gdb"                default="false"/>
+
+  <group if="$(arg use_fiducial_detector)">
+    <include file="$(find fiducial_detector)/launch/fiducial_detectors_landmarks_preprocessor.launch">
+      <arg name="use_first_camera"                        value="$(arg fiducial_detector_use_first_camera)" />
+      <arg name="first_camera_machine"                    value="$(arg fiducial_detector_first_camera_machine)" />
+      <arg name="first_camera_name"                       value="$(arg fiducial_detector_first_camera_name)" />
+      <arg name="first_camera_serial_number"              value="$(arg fiducial_detector_first_camera_serial)"/>
+      <arg name="first_camera_xyz_ypr"                    value="$(arg fiducial_detector_first_camera_xyz_ypr)" />
+      <arg name="use_second_camera"                       value="$(arg fiducial_detector_use_second_camera)" />
+      <arg name="second_camera_machine"                   value="$(arg fiducial_detector_second_camera_machine)" />
+      <arg name="second_camera_name"                      value="$(arg fiducial_detector_second_camera_name)" />
+      <arg name="second_camera_serial_number"             value="$(arg fiducial_detector_second_camera_serial)"/>
+      <arg name="second_camera_xyz_ypr"                   value="$(arg fiducial_detector_second_camera_xyz_ypr)" />
+      <arg name="use_default_camera_params"               value="$(arg fiducial_detector_use_default_camera_params)" />
+      <arg name="use_landmark_preprocessor"               value="$(arg use_landmark_preprocessor)"/>
+      <arg name="landmark_map_file"                       value="$(arg fiducial_detector_landmarks_map_file)" />
+      <arg name="april_tag_size"                          value="$(arg april_tag_size)" />
+      <arg name="relay_second_camera_topics"              value="$(arg relay_second_camera_topics)" />
+      <arg name="landmark_preprocessor_in_gdb"            value="$(arg landmark_preprocessor_in_gdb)"/>
+      <arg name="fiducial_detector_in_gdb"                value="$(arg fiducial_detector_in_gdb)"/>
+    </include>
+  </group>
+</launch>

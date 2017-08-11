@@ -1,0 +1,65 @@
+<launch>
+  <arg name="use_first_camera"                  default="true"/>
+  <arg name="first_camera_machine"              default="qcbot1"/>
+  <arg name="first_camera_name"                 default="pointgrey_left"/>
+  <arg name="first_camera_serial_number"        default="0"/>
+  <arg name="first_camera_xyz_ypr"              default="0.0 0.0 0.0 0.0 0.0 0.0"/>
+
+  <arg name="use_second_camera"                 default="true"/>
+  <arg name="second_camera_machine"             default="qcbot2"/>
+  <arg name="second_camera_name"                default="pointgrey_right"/>
+  <arg name="second_camera_serial_number"       default="0"/>
+  <arg name="second_camera_xyz_ypr"             default="0.0 0.0 0.0 0.0 0.0 0.0"/>
+
+  <arg name="use_default_camera_params"         default="true" />
+
+  <arg name="april_tag_size"                    default="0.415" /> <!-- others: 0.083 -->
+
+  <arg name="relay_second_camera_topics"        default="false"/>
+
+  <arg name="use_landmark_preprocessor"         default="true"/>
+  <arg name="landmark_map_file"                 default="$(find fiducial_detector)/maps/sample_map.yaml" />
+
+  <arg name="fiducial_detector_in_gdb"          default="false"/>
+  <arg name="landmark_preprocessor_in_gdb"      default="false"/>
+
+  <group if="$(arg use_first_camera)">
+    <include file="$(find fiducial_detector)/launch/fiducial_camera_and_detector.launch">
+      <arg name="camera_machine"                value="$(arg first_camera_machine)" />
+      <arg name="camera_name"                   value="$(arg first_camera_name)" />
+      <arg name="camera_serial_number"          value="$(arg first_camera_serial_number)" />
+      <arg name="use_default_camera_params"     value="$(arg use_default_camera_params)" />
+      <arg name="camera_xyz_ypr"                value="$(arg first_camera_xyz_ypr)" />
+      <arg name="capture_mode"                  value="true" />
+      <arg name="april_tag_size"                value="$(arg april_tag_size)" />
+      <arg name="run_in_gdb"                    value="$(arg fiducial_detector_in_gdb)" />
+    </include>
+  </group>
+
+  <group if="$(arg use_second_camera)">
+    <include file="$(find fiducial_detector)/launch/fiducial_camera_and_detector.launch">
+      <arg name="camera_machine"                value="$(arg second_camera_machine)" />
+      <arg name="camera_name"                   value="$(arg second_camera_name)" />
+      <arg name="camera_serial_number"          value="$(arg second_camera_serial_number)" />
+      <arg name="use_default_camera_params"     value="$(arg use_default_camera_params)" />
+      <arg name="camera_xyz_ypr"                value="$(arg second_camera_xyz_ypr)" />
+      <arg name="capture_mode"                  value="true" />
+      <arg name="april_tag_size"                value="$(arg april_tag_size)" />
+      <arg name="run_in_gdb"                    value="$(arg fiducial_detector_in_gdb)" />
+    </include>
+  </group>
+
+  <!-- For landmark recognition -->
+  <include file="$(find fiducial_detector)/launch/landmark_preprocessor.launch" if="$(arg use_landmark_preprocessor)">
+    <arg name="preprocess_machine"              value="$(arg first_camera_machine)" />
+    <arg name="landmark_map_file"               value="$(arg landmark_map_file)" />
+    <arg name="first_fiducial_detector_node"    value="apriltag_detector_$(arg first_camera_name)"  if="$(arg use_first_camera)" />
+    <arg name="first_fiducial_detector_node"    value=""                                            unless="$(arg use_first_camera)" />
+    <arg name="second_fiducial_detector_node"   value="apriltag_detector_$(arg second_camera_name)" if="$(arg use_second_camera)" />
+    <arg name="second_fiducial_detector_node"   value=""                                            unless="$(arg use_second_camera)" />
+    <arg name="run_in_gdb"                      value="$(arg landmark_preprocessor_in_gdb)" />
+  </include>
+
+  </group>
+
+</launch>

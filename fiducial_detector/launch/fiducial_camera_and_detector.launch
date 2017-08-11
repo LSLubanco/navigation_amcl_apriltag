@@ -1,0 +1,75 @@
+<launch>
+  <arg name="camera_machine" />
+  <arg name="simulation"                  default="false" />
+  <arg name="capture_mode"                default="true"/>
+
+  <!-- Specify a camera name to be included in tag message header -->
+  <arg name="camera_name"                 default="pointgrey" />
+  <arg name="camera_serial_number"        default="0" />
+  <arg name="use_default_camera_params"   default="true" />
+  <arg name="camera_xyz_ypr"              default="0.0 0.0 0.0 0.0 0.0 0.0" />
+
+  <arg name="fiducial_detector_prefix"    default="apriltag_detector" />
+  <arg name="fiducial_detector_node_name" default="$(arg fiducial_detector_prefix)_$(arg camera_name)" />
+
+  <arg name="april_tag_size"              default="0.415" />
+
+  <arg name="run_in_gdb"                  default="false"/>
+  <arg name="launch-prefix"               value="screen -d -m gdb -ex run --args" if="$(arg run_in_gdb)" />
+  <arg name="launch-prefix"               value=""                                unless="$(arg run_in_gdb)" />
+  <arg name="respawn_fiducial_detector"   value="false"                           if="$(arg run_in_gdb)"/>
+  <arg name="respawn_fiducial_detector"   value="true"                            unless="$(arg run_in_gdb)"/>
+
+  <arg name="image_topic"                 default="/image_raw" />
+
+  <node pkg="tf" type="static_transform_publisher" name="$(arg camera_name)_frame_publisher"
+        args="$(arg camera_xyz_ypr) robot $(arg camera_name) 100" />
+
+  <node pkg="tf" type="static_transform_publisher" name="$(arg camera_name)_optical_frame_publisher"
+        args="0 0 0 -1.571 0 -1.571 $(arg camera_name) $(arg camera_name)_optical 100" />
+
+  <group if="$(arg use_default_camera_params)">
+    <arg name="camera_x_resolution"         value="1288" />
+    <arg name="camera_y_resolution"         value="964" />
+    <arg name="camera_caltech_distortion"   value="-0.221836,   0.213816,   0.000057,   0.001061,  -0.080415" />
+    <arg name="camera_K_matrix"             value="1097.057965, 0.296160, 641.336699, 0.000000, 1095.199776, 481.089259, 0.000000, 0.000000, 1.000000" />
+
+    <node name="$(arg fiducial_detector_node_name)_camInfoRostopicPub"
+      pkg="rostopic" type="rostopic"
+      args="pub --latch /$(arg fiducial_detector_node_name)/cam_info sensor_msgs/CameraInfo '{ &quot;height&quot;: $(arg camera_y_resolution), &quot;width&quot;: $(arg camera_x_resolution), &quot;distortion_model&quot;: &quot;aprilcal_caltech&quot;, &quot;D&quot;: [$(arg camera_caltech_distortion)], &quot;K&quot;: [$(arg camera_K_matrix)] }'" />
+  </group>
+
+  <node name="$(arg fiducial_detector_node_name)_aprilTagSizeRostopicPub" pkg="rostopic" type="rostopic"
+        args="pub --latch /$(arg fiducial_detector_node_name)/april_tag_size std_msgs/Float32 &quot;data: $(arg april_tag_size)&quot;" />
+
+  <group unless="$(arg simulation)">
+    <!-- fiducial_detector node -->
+    <node name="$(arg fiducial_detector_node_name)" pkg="fiducial_detector" type="fiducial_detector"
+          machine="$(arg camera_machine)" launch-prefix="$(arg launch-prefix)" respawn="$(arg respawn_fiducial_detector)">
+
+      <!--  Specify family the fiducial belongs to (ex: 36h11, 16h5, 25h7 etc.) -->
+      <param name="tag_family" type="string" value="36h11" />
+
+      <!--  Input the size of tag in meters -->
+      <param name="tag_size" type="double" value="0.083" />
+
+      <!--  Set the debug flag to output detections and show them on input image -->
+      <param name="debug" type="bool" value="true" />
+
+      <param name="camera_name" type="string" value="$(arg camera_name)" />
+
+      <param name="camera_serial_number" type="string" value="$(arg camera_serial_number)" />
+
+      <param name="caminfo_topic" type="string" value="cam_info" />
+
+      <!-- Set capture mode to use FlyCapture SDK Capture method/ Set false to use an image from ros topic -->
+      <param name="capture_mode" type="bool" value="$(arg capture_mode)" />
+
+      <!-- Set the undistort flag to perform image undistortion(**currently only for pointgrey**) -->
+      <param name="undistort" type="bool" value="true" />
+
+      <!-- Set image topic if "capture_mode" is set to false -->
+      <param name="image_topic" type="string" value="$(arg image_topic)" />
+    </node>
+  </group>
+</launch>

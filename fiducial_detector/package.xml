@@ -1,0 +1,33 @@
+<package>
+  <name>fiducial_detector</name>
+  <version>0.0.1</version>
+  <description>"fiducial_detector"</description>
+  <author>Sai</author>
+  <maintainer email="zachary.dydek@vecna.com">Zachary Dydek</maintainer>
+  <license>BSD</license>
+  <url>http://ros.org/wiki/landmark_detection</url>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <build_depend>apriltags</build_depend>
+  <build_depend>roscpp</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>rosmsg</build_depend>
+  <build_depend>image_transport</build_depend>
+  <build_depend>cv_bridge</build_depend>
+  <build_depend>tf</build_depend>
+
+  <run_depend>message_generation</run_depend>
+  <run_depend>apriltags</run_depend>
+  <run_depend>roscpp</run_depend>
+  <run_depend>sensor_msgs</run_depend>
+  <run_depend>std_msgs</run_depend>
+  <run_depend>rosmsg</run_depend>
+  <run_depend>image_transport</run_depend>
+  <run_depend>cv_bridge</run_depend>
+  <run_depend>tf</run_depend>
+</package>
+
+
