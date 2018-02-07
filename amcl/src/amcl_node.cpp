@@ -289,6 +289,7 @@ class AmclNode
     double m_fiducialParticleSupportXYVarianceThreshold;
     double m_fiducialParticleSupportYawVarianceThreshold;
     double m_numFiducialParticlesSupportFraction;
+    int m_fiducial_pose_init_force_update_count;
 
     ros::Time m_previousFiducialPoseUpdateTime;
 
@@ -382,7 +383,7 @@ AmclNode::AmclNode() :
   private_nh_.param("odom_alpha3", alpha3_, 0.2);
   private_nh_.param("odom_alpha4", alpha4_, 0.2);
   private_nh_.param("odom_alpha5", alpha5_, 0.2);
-  
+
   private_nh_.param("fiducial_landmarks_topic", m_fiducial_landmarks_topic, std::string("landmark_preprocessor/landmarks"));
   private_nh_.param("fiducial_detected_robot_dist_skip_threshold", m_robotToFiducialDetectedRobotDistSkipThreshold, 4.0);
   private_nh_.param("fiducial_detected_robot_yaw_skip_threshold", m_robotToFiducialDetectedRobotYawSkipThreshold, M_PI/2);
@@ -478,7 +479,7 @@ AmclNode::AmclNode() :
 
   pose_pub_ = nh_.advertise<geometry_msgs::PoseWithCovarianceStamped>("amcl_pose", 2, true);
   particlecloud_pub_ = nh_.advertise<geometry_msgs::PoseArray>("particlecloud", 2, true);
-  global_loc_srv_ = nh_.advertiseService("global_localization", 
+  global_loc_srv_ = nh_.advertiseService("global_localization",
 					 &AmclNode::globalLocalizationCallback,
                                          this);
   nomotion_update_srv_= nh_.advertiseService("request_nomotion_update", &AmclNode::nomotionUpdateCallback, this);
@@ -522,10 +523,11 @@ AmclNode::AmclNode() :
 
   // 15s timer to warn on lack of receipt of laser scans, #5209
   laser_check_interval_ = ros::Duration(15.0);
-  check_laser_timer_ = nh_.createTimer(laser_check_interval_, 
+  check_laser_timer_ = nh_.createTimer(laser_check_interval_,
                                        boost::bind(&AmclNode::checkLaserReceived, this, _1));
 
   m_fiducialDetectionSub = nh_.subscribe(m_fiducial_landmarks_topic, 1, &AmclNode::fiducialsReceived, this);
+  m_fiducial_pose_init_force_update_count = 0;
 }
 
 void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
@@ -605,16 +607,16 @@ void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
   alpha_fast_ = config.recovery_alpha_fast;
   tf_broadcast_ = config.tf_broadcast;
 
-  do_beamskip_= config.do_beamskip; 
-  beam_skip_distance_ = config.beam_skip_distance; 
-  beam_skip_threshold_ = config.beam_skip_threshold; 
+  do_beamskip_= config.do_beamskip;
+  beam_skip_distance_ = config.beam_skip_distance;
+  beam_skip_threshold_ = config.beam_skip_threshold;
 
   pf_ = pf_alloc(min_particles_, max_particles_,
                  alpha_slow_, alpha_fast_,
                  (pf_init_model_fn_t)AmclNode::uniformPoseGenerator,
                  (void *)map_);
-  pf_err_ = config.kld_err; 
-  pf_z_ = config.kld_z; 
+  pf_err_ = config.kld_err;
+  pf_z_ = config.kld_z;
   pf_->pop_err = pf_err_;
   pf_->pop_z = pf_z_;
 
@@ -646,8 +648,8 @@ void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
   else if(laser_model_type_ == LASER_MODEL_LIKELIHOOD_FIELD_PROB){
     ROS_INFO("Initializing likelihood field model; this can take some time on large maps...");
     laser_->SetModelLikelihoodFieldProb(z_hit_, z_rand_, sigma_hit_,
-					laser_likelihood_max_dist_, 
-					do_beamskip_, beam_skip_distance_, 
+					laser_likelihood_max_dist_,
+					do_beamskip_, beam_skip_distance_,
 					beam_skip_threshold_, beam_skip_error_threshold_);
     ROS_INFO("Done initializing likelihood field model with probabilities.");
   }
@@ -783,11 +785,11 @@ void AmclNode::savePoseToServer()
   private_nh_.setParam("initial_pose_x", map_pose.getOrigin().x());
   private_nh_.setParam("initial_pose_y", map_pose.getOrigin().y());
   private_nh_.setParam("initial_pose_a", yaw);
-  private_nh_.setParam("initial_cov_xx", 
+  private_nh_.setParam("initial_cov_xx",
                                   last_published_pose.pose.covariance[6*0+0]);
-  private_nh_.setParam("initial_cov_yy", 
+  private_nh_.setParam("initial_cov_yy",
                                   last_published_pose.pose.covariance[6*1+1]);
-  private_nh_.setParam("initial_cov_aa", 
+  private_nh_.setParam("initial_cov_aa",
                                   last_published_pose.pose.covariance[6*5+5]);
 }
 
@@ -804,7 +806,7 @@ void AmclNode::updatePoseFromServer()
   private_nh_.param("initial_pose_x", tmp_pos, init_pose_[0]);
   if(!std::isnan(tmp_pos))
     init_pose_[0] = tmp_pos;
-  else 
+  else
     ROS_WARN("ignoring NAN in initial pose X position");
   private_nh_.param("initial_pose_y", tmp_pos, init_pose_[1]);
   if(!std::isnan(tmp_pos))
@@ -830,10 +832,10 @@ void AmclNode::updatePoseFromServer()
   if(!std::isnan(tmp_pos))
     init_cov_[2] = tmp_pos;
   else
-    ROS_WARN("ignoring NAN in initial covariance AA");	
+    ROS_WARN("ignoring NAN in initial covariance AA");
 }
 
-void 
+void
 AmclNode::checkLaserReceived(const ros::TimerEvent& event)
 {
   ros::Duration d = ros::Time::now() - last_laser_received_ts_;
@@ -943,8 +945,8 @@ AmclNode::handleMapMessage(const nav_msgs::OccupancyGrid& msg)
   else if(laser_model_type_ == LASER_MODEL_LIKELIHOOD_FIELD_PROB){
     ROS_INFO("Initializing likelihood field model; this can take some time on large maps...");
     laser_->SetModelLikelihoodFieldProb(z_hit_, z_rand_, sigma_hit_,
-					laser_likelihood_max_dist_, 
-					do_beamskip_, beam_skip_distance_, 
+					laser_likelihood_max_dist_,
+					do_beamskip_, beam_skip_distance_,
 					beam_skip_threshold_, beam_skip_error_threshold_);
     ROS_INFO("Done initializing likelihood field model.");
   }
@@ -1104,7 +1106,7 @@ AmclNode::globalLocalizationCallback(std_srvs::Empty::Request& req,
 }
 
 // force nomotion updates (amcl updating without requiring motion)
-bool 
+bool
 AmclNode::nomotionUpdateCallback(std_srvs::Empty::Request& req,
                                      std_srvs::Empty::Response& res)
 {
@@ -1297,6 +1299,7 @@ void AmclNode::fiducialsReceived(const fiducial_detector::LandmarkDetectionArray
       applyInitialPose();
 
       pose_initialized = true;
+      m_fiducial_pose_init_force_update_count = 20;
     }
 
     if (pose_initialized || m_robot_motion_detected_trigger_fiducial_update
@@ -1558,8 +1561,9 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
       m_robot_motion_detected_trigger_fiducial_update = true;
     }
 
-    bool update = m_robot_motion_detected || m_force_update;
+    bool update = m_robot_motion_detected || m_force_update || (m_fiducial_pose_init_force_update_count > 0);
     m_force_update=false;
+    m_fiducial_pose_init_force_update_count = std::max(0, m_fiducial_pose_init_force_update_count - 1);
 
     // Set the laser update flags
     if(update)
